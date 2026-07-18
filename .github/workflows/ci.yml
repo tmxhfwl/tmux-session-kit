@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n bin/* install.sh uninstall.sh
+      - name: ShellCheck
+        run: shellcheck -S warning bin/* install.sh uninstall.sh

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# tmux-session-kit uninstaller
+# fleetmux uninstaller
 set -euo pipefail
 
 BIN_DIR="$HOME/.local/bin"
 TMUX_CONF="$HOME/.tmux.conf"
-CONFIG_DIR="$HOME/.config/tmux-session-kit"
-MARK_BEGIN="# >>> tmux-session-kit >>>"
-MARK_END="# <<< tmux-session-kit <<<"
+CONFIG_DIR="$HOME/.config/fleetmux"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fleetmux"
+MARK_BEGIN="# >>> fleetmux >>>"
+MARK_END="# <<< fleetmux <<<"
 
-rm -f "$BIN_DIR/tmux-sessions" "$BIN_DIR/dev-launcher" "$BIN_DIR/ts"
+rm -f "$BIN_DIR/tmux-sessions" "$BIN_DIR/dev-launcher" "$BIN_DIR/ts" "$BIN_DIR/fleetmux-hook"
+rm -rf "$STATE_DIR"
 echo "✓ Removed executables"
 
 if [[ -f "$TMUX_CONF" ]] && grep -qF "$MARK_BEGIN" "$TMUX_CONF"; then

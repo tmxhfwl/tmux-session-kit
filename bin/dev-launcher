@@ -6,7 +6,9 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # ── i18n ────────────────────────────────────────────────────
-TSK_CONFIG="$HOME/.config/tmux-session-kit/config"
+CONFIG_DIR="$HOME/.config/fleetmux"
+TSK_CONFIG="$CONFIG_DIR/config"
+LAUNCHER_CONF="$CONFIG_DIR/launcher.conf"
 TSK_LANG="en"
 # shellcheck source=/dev/null
 [[ -f "$TSK_CONFIG" ]] && source "$TSK_CONFIG"
@@ -36,16 +38,44 @@ run_command() {
   fi
 }
 
+# Custom menu entries: ~/.config/fleetmux/launcher.conf, one per line:
+#   icon|label|command
+# e.g.  |htop|htop
+build_menu() {
+  printf '%s\n' \
+    "󰆍  Sessions" \
+    "󰕰  Tree" \
+    "󰊢  Git" \
+    "󰡨  Docker" \
+    "󰉋  Files" \
+    "󰚩  Claude"
+  if [[ -f "$LAUNCHER_CONF" ]]; then
+    local icon label cmd
+    while IFS='|' read -r icon label cmd; do
+      [[ -z "$label" || "$icon" == \#* ]] && continue
+      printf '%s  %s\n' "${icon:- }" "$label"
+    done <"$LAUNCHER_CONF"
+  fi
+  printf '%s\n' "󰩈  Exit"
+}
+
+custom_command_for() {
+  # custom_command_for <label> — look up the command for a custom menu label
+  local wanted="$1" icon label cmd
+  [[ -f "$LAUNCHER_CONF" ]] || return 1
+  while IFS='|' read -r icon label cmd; do
+    [[ -z "$label" || "$icon" == \#* ]] && continue
+    if [[ "$label" == "$wanted" ]]; then
+      printf '%s' "$cmd"
+      return 0
+    fi
+  done <"$LAUNCHER_CONF"
+  return 1
+}
+
 while true; do
   choice=$(
-    printf '%s\n' \
-      "󰆍  Sessions" \
-      "󰕰  Tree" \
-      "󰊢  Git" \
-      "󰡨  Docker" \
-      "󰉋  Files" \
-      "󰚩  Claude" \
-      "󰩈  Exit" |
+    build_menu |
       fzf \
         --height=100% \
         --layout=reverse \
@@ -91,6 +121,13 @@ while true; do
       ;;
     *"Exit"|"")
       exit 0
+      ;;
+    *)
+      # Custom entry from launcher.conf — strip the "icon  " prefix
+      label="${choice#*  }"
+      if cmd=$(custom_command_for "$label"); then
+        bash -c "$cmd" || pause_with_error "$(printf "$MSG_NOT_FOUND_FMT" "$label")"
+      fi
       ;;
   esac
 done

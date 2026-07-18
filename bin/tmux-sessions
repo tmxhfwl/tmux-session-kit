@@ -1,37 +1,80 @@
 #!/usr/bin/env bash
-# tmux-sessions — fzf-based tmux session manager
+# tmux-sessions (fleetmux) — fzf-based tmux session dashboard
 #
 # Outside tmux: pick a session to attach, or type a new name to create one.
 # Inside tmux:  switches sessions via switch-client (no nesting).
-#               The current session is excluded from the list.
+#
+# Sessions running AI agents (via fleetmux-hook) show live status badges and
+# are sorted so agents needing input surface to the top.
 #
 # Keys:
 #   Enter  — attach selected session / create session with typed name
 #   Ctrl-N — force-create a session with the typed name
-#   Ctrl-R — rename selected session
-#   Ctrl-X — kill selected session (with confirmation)
+#   Ctrl-R — rename selected session (in place, no screen flicker)
+#   Ctrl-X — kill selected session (in place, no screen flicker)
+#   Ctrl-F — directory sessionizer (zoxide or configured paths)
+#   Ctrl-P — create a session from a preset
 #   Esc    — quit
+#
+# Also: `ts -` toggles to the previously used session.
 set -euo pipefail
 
-# ── i18n ────────────────────────────────────────────────────
-TSK_CONFIG="$HOME/.config/tmux-session-kit/config"
-TSK_LANG="en"
-# shellcheck source=/dev/null
-[[ -f "$TSK_CONFIG" ]] && source "$TSK_CONFIG"
+FLEETMUX_VERSION="0.2.0"
 
+CONFIG_DIR="$HOME/.config/fleetmux"
+CONFIG_FILE="$CONFIG_DIR/config"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fleetmux/agents"
+PRESET_DIR="$CONFIG_DIR/presets"
+
+TSK_LANG="en"
+SESSIONIZER_PATHS=""
+# shellcheck source=/dev/null
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+SESSIONIZER_PATHS="${SESSIONIZER_PATHS:-$HOME/projects:$HOME/work}"
+
+# ── i18n ────────────────────────────────────────────────────
 if [[ "$TSK_LANG" == "ko" ]]; then
-  MSG_HEADER=$'단축키:\n  Enter : 접속 (없는 이름이면 새로 생성)\n  C-n   : 새 세션 강제 생성\n  C-r   : 이름 변경\n  C-x   : 삭제'
+  MSG_HEADER=$'단축키:\n  Enter : 접속 (없는 이름이면 새로 생성)    C-n : 새 세션 강제 생성\n  C-r   : 이름 변경                          C-x : 삭제\n  C-f   : 디렉토리로 세션 만들기             C-p : 프리셋으로 만들기'
   MSG_CURRENT_SESSION="현재 세션"
   MSG_NEW_SESSION_PREVIEW="(새 세션으로 생성됩니다)"
   MSG_RENAME_FMT="'%s' 의 새 이름 (빈 입력 = 취소): "
   MSG_DELETE_FMT="세션 '%s' 삭제?  (1) 예 / (2) 아니오: "
+  MSG_CANNOT_KILL_CURRENT="현재 세션은 여기서 삭제할 수 없습니다."
+  MSG_WINDOWS="윈도우"
+  MSG_AGENT="에이전트"
+  MSG_DIR_PROMPT="directory > "
+  MSG_PRESET_PROMPT="preset > "
+  MSG_NO_PRESETS="프리셋이 없습니다. ~/.config/fleetmux/presets/*.conf 를 만들어 주세요."
+  MSG_STATUS_working="작업 중"
+  MSG_STATUS_waiting="입력 대기"
+  MSG_STATUS_attention="확인 필요"
+  MSG_STATUS_done="완료"
+  MSG_HELP=$'사용법: ts [옵션]\n  (없음)      세션 피커 실행\n  -           직전 세션으로 토글\n  --version   버전 표시\n  --help      이 도움말'
 else
-  MSG_HEADER=$'Keys:\n  Enter : attach (creates it if the name is new)\n  C-n   : force-create new session\n  C-r   : rename session\n  C-x   : kill session'
+  MSG_HEADER=$'Keys:\n  Enter : attach (creates it if the name is new)   C-n : force-create session\n  C-r   : rename session                           C-x : kill session\n  C-f   : new session from directory               C-p : new session from preset'
   MSG_CURRENT_SESSION="Current session"
   MSG_NEW_SESSION_PREVIEW="(will be created as a new session)"
   MSG_RENAME_FMT="New name for '%s' (empty = cancel): "
   MSG_DELETE_FMT="Kill session '%s'?  (1) yes / (2) no: "
+  MSG_CANNOT_KILL_CURRENT="The current session cannot be killed from here."
+  MSG_WINDOWS="windows"
+  MSG_AGENT="agent"
+  MSG_DIR_PROMPT="directory > "
+  MSG_PRESET_PROMPT="preset > "
+  MSG_NO_PRESETS="No presets found. Create ~/.config/fleetmux/presets/*.conf first."
+  MSG_STATUS_working="working"
+  MSG_STATUS_waiting="waiting for input"
+  MSG_STATUS_attention="needs attention"
+  MSG_STATUS_done="done"
+  MSG_HELP=$'Usage: ts [option]\n  (none)      open the session picker\n  -           toggle to the previous session\n  --version   print version\n  --help      this help'
 fi
+
+C_RESET=$'\033[0m'
+C_DIM=$'\033[2m'
+C_GREEN=$'\033[32m'
+C_YELLOW=$'\033[33m'
+C_CYAN=$'\033[36m'
+C_BOLD=$'\033[1m'
 
 # ── tmux context ────────────────────────────────────────────
 inside_tmux=false
@@ -41,7 +84,6 @@ if [[ -n "${TMUX:-}" ]]; then
   current_session=$(tmux display-message -p '#{session_name}')
 fi
 
-# Go to a session: switch-client inside tmux (avoids nesting), attach outside.
 goto_session() {
   local name="$1"
   if $inside_tmux; then
@@ -53,89 +95,317 @@ goto_session() {
 }
 
 create_session() {
-  local name="$1"
+  local name="$1" dir="${2:-}"
+  local args=()
+  [[ -n "$dir" ]] && args=(-c "$dir")
   if $inside_tmux; then
-    tmux new-session -d -s "$name"
+    tmux new-session -d -s "$name" "${args[@]}"
     tmux switch-client -t "=$name"
   else
-    exec tmux new-session -s "$name"
+    exec tmux new-session -s "$name" "${args[@]}"
   fi
   exit 0
 }
 
-# ── main loop ───────────────────────────────────────────────
-while true; do
-  mapfile -t all_sessions < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+# ── agent state ─────────────────────────────────────────────
+# State files: $STATE_DIR/<session>.state — one-line JSON written by fleetmux-hook.
+read_state_field() {
+  # read_state_field <file> <key> — minimal flat-JSON field extractor
+  sed -n "s/.*\"$2\":\"\{0,1\}\([^\",}]*\)\"\{0,1\}[,}].*/\1/p" "$1" 2>/dev/null | head -1
+}
 
-  # Exclude the current session from the pick list (shown in the header instead)
-  sessions=()
-  for s in "${all_sessions[@]}"; do
-    [[ -n "$s" && "$s" != "$current_session" ]] && sessions+=("$s")
-  done
+status_label() {
+  case "$1" in
+    working)   echo "$MSG_STATUS_working" ;;
+    waiting)   echo "$MSG_STATUS_waiting" ;;
+    attention) echo "$MSG_STATUS_attention" ;;
+    done)      echo "$MSG_STATUS_done" ;;
+    *)         echo "$1" ;;
+  esac
+}
 
-  header="$MSG_HEADER"
-  if $inside_tmux; then
-    header="${MSG_CURRENT_SESSION}: ${current_session}"$'\n\n'"$header"
+rel_time() {
+  local diff=$(( $(date +%s) - $1 ))
+  if   (( diff < 60 ));    then echo "${diff}s"
+  elif (( diff < 3600 ));  then echo "$((diff / 60))m"
+  elif (( diff < 86400 )); then echo "$((diff / 3600))h"
+  else                          echo "$((diff / 86400))d"
+  fi
+}
+
+# ── subcommand: --list ──────────────────────────────────────
+# Prints "name<TAB>sortkey<TAB><ansi pretty line>" sorted: attention, waiting,
+# working, then the rest by recent activity. Excludes the current session.
+list_sessions() {
+  local rows=()
+  local name windows activity attached
+  local sfile status agent detail glyph sortkey badge info name_disp
+
+  # Clean up state files for sessions that no longer exist
+  if [[ -d "$STATE_DIR" ]]; then
+    local live f base
+    live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+    for f in "$STATE_DIR"/*.state; do
+      [[ -e "$f" ]] || continue
+      base=$(basename "$f" .state)
+      grep -qxF "$base" <<<"$live" || rm -f "$f"
+    done
   fi
 
-  set +e
-  result=$(
-    { ((${#sessions[@]})) && printf '%s\n' "${sessions[@]}"; } |
-      fzf \
-        --height=100% \
-        --layout=reverse \
-        --border=rounded \
-        --prompt="tmux session > " \
-        --header="$header" \
-        --pointer="▶" \
-        --info=inline \
-        --preview "tmux capture-pane -ep -t {} 2>/dev/null || echo \"$MSG_NEW_SESSION_PREVIEW\"" \
-        --preview-window=right:55% \
-        --print-query \
-        --expect=ctrl-n,ctrl-r,ctrl-x
-  )
-  fzf_status=$?
-  set -e
+  while IFS=$'\t' read -r name windows activity attached; do
+    [[ -z "$name" || "$name" == "$current_session" ]] && continue
 
-  # Esc / Ctrl-C
-  [[ $fzf_status -eq 130 ]] && exit 0
+    status="" agent="" detail=""
+    sfile="$STATE_DIR/$name.state"
+    if [[ -f "$sfile" ]]; then
+      status=$(read_state_field "$sfile" status)
+      agent=$(read_state_field "$sfile" agent)
+      detail=$(read_state_field "$sfile" detail)
+    fi
 
-  query=$(sed -n '1p' <<<"$result")
-  key=$(sed -n '2p' <<<"$result")
-  selection=$(sed -n '3p' <<<"$result")
+    case "$status" in
+      attention) glyph="${C_YELLOW}●${C_RESET}"; sortkey=0 ;;
+      waiting)   glyph="${C_CYAN}●${C_RESET}";   sortkey=1 ;;
+      working)   glyph="${C_GREEN}●${C_RESET}";  sortkey=2 ;;
+      done)      glyph="${C_DIM}●${C_RESET}";    sortkey=3 ;;
+      *)         glyph=" ";                      sortkey=4 ;;
+    esac
 
-  case "$key" in
-    ctrl-n)
-      # Ignore the list selection; force-create with the typed name
-      [[ -z "$query" ]] && continue
+    if [[ -n "$status" ]]; then
+      badge="${agent:-agent}: $(status_label "$status")"
+      info="${detail:-}"
+    else
+      badge="-"
+      info="$(rel_time "$activity")"
+    fi
+    # Pad the plain text first, then colorize — ANSI codes would break %-Ns width
+    if [[ "$attached" == "1" ]]; then
+      name_disp="$(printf '%-24s' "${name}*")"
+      name_disp="${C_BOLD}${name_disp}${C_RESET}"
+    else
+      name_disp="$(printf '%-24s' "$name")"
+    fi
+
+    rows+=("$(printf '%s\t%d%010d\t%s %s %3sw  %-28s %s' \
+      "$name" "$sortkey" "$((9999999999 - activity))" \
+      "$glyph" "$name_disp" "$windows" "$badge" "${C_DIM}${info}${C_RESET}")")
+  done < <(tmux list-sessions \
+      -F $'#{session_name}\t#{session_windows}\t#{session_activity}\t#{session_attached}' \
+      2>/dev/null || true)
+
+  ((${#rows[@]})) || return 0
+  printf '%s\n' "${rows[@]}" | sort -t$'\t' -k2,2n | cut -f1,3-
+}
+
+# ── subcommand: --preview <name> ────────────────────────────
+preview_session() {
+  local name="$1"
+  tmux has-session -t "=$name" 2>/dev/null || { echo "$MSG_NEW_SESSION_PREVIEW"; return 0; }
+
+  local sfile="$STATE_DIR/$name.state"
+  if [[ -f "$sfile" ]]; then
+    local status agent detail ts
+    status=$(read_state_field "$sfile" status)
+    agent=$(read_state_field "$sfile" agent)
+    detail=$(read_state_field "$sfile" detail)
+    ts=$(read_state_field "$sfile" ts)
+    printf '%s%s: %s — %s%s' "$C_BOLD" "${agent:-$MSG_AGENT}" "$(status_label "$status")" \
+      "${detail:--}" "$C_RESET"
+    [[ -n "$ts" ]] && printf ' %s(%s)%s' "$C_DIM" "$(rel_time "$ts")" "$C_RESET"
+    printf '\n'
+  fi
+
+  printf '%s%s:%s ' "$C_DIM" "$MSG_WINDOWS" "$C_RESET"
+  tmux list-windows -t "=$name" \
+    -F '#{window_index}:#{window_name}#{?window_active,*,}' 2>/dev/null | paste -sd' ' -
+  printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────" "$C_RESET"
+  tmux capture-pane -ep -t "=$name" 2>/dev/null || true
+}
+
+# ── subcommands: --kill / --rename (run inside fzf execute) ─
+kill_session_ui() {
+  local name="$1"
+  [[ -z "$name" ]] && return 0
+  if [[ -n "$current_session" && "$name" == "$current_session" ]]; then
+    echo "$MSG_CANNOT_KILL_CURRENT"
+    sleep 1
+    return 0
+  fi
+  local confirm
+  # shellcheck disable=SC2059
+  read -r -p "$(printf "$MSG_DELETE_FMT" "$name")" confirm || true
+  if [[ "${confirm:-}" == "1" ]]; then
+    tmux kill-session -t "=$name" 2>/dev/null || true
+  fi
+}
+
+rename_session_ui() {
+  local name="$1" new_name
+  [[ -z "$name" ]] && return 0
+  # shellcheck disable=SC2059
+  read -r -p "$(printf "$MSG_RENAME_FMT" "$name")" new_name || true
+  if [[ -n "${new_name:-}" ]]; then
+    tmux rename-session -t "=$name" "$new_name" 2>/dev/null || true
+  fi
+}
+
+# ── sessionizer (Ctrl-F): pick a directory, get a session ───
+sessionizer() {
+  local dirs=""
+  if command -v zoxide >/dev/null 2>&1; then
+    dirs=$(zoxide query -l 2>/dev/null || true)
+  fi
+  if [[ -z "$dirs" ]]; then
+    local IFS=':'
+    local p
+    for p in $SESSIONIZER_PATHS; do
+      p="${p/#\~/$HOME}"
+      [[ -d "$p" ]] || continue
+      dirs+=$(find "$p" -mindepth 1 -maxdepth 2 -type d -not -path '*/.*' 2>/dev/null)$'\n'
+    done
+  fi
+  [[ -z "$dirs" ]] && return 0
+
+  local dir
+  dir=$(printf '%s\n' "$dirs" | grep -v '^$' |
+    fzf --height=100% --layout=reverse --border=rounded \
+        --prompt="$MSG_DIR_PROMPT" --info=inline) || return 0
+  [[ -z "$dir" ]] && return 0
+
+  local name
+  name=$(basename "$dir" | tr '.:' '__')
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    goto_session "$name"
+  else
+    create_session "$name" "$dir"
+  fi
+}
+
+# ── presets (Ctrl-P): declarative session templates ─────────
+# ~/.config/fleetmux/presets/<name>.conf:
+#   root=~/projects/api
+#   window=editor:vim
+#   window=server:npm run dev
+#   window=logs:
+create_from_preset() {
+  local files=("$PRESET_DIR"/*.conf)
+  if [[ ! -e "${files[0]}" ]]; then
+    echo "$MSG_NO_PRESETS"
+    sleep 1.5
+    return 0
+  fi
+
+  local choice f
+  choice=$(for f in "${files[@]}"; do basename "$f" .conf; done |
+    fzf --height=100% --layout=reverse --border=rounded \
+        --prompt="$MSG_PRESET_PROMPT" --info=inline \
+        --preview "cat '$PRESET_DIR'/{}.conf") || return 0
+  [[ -z "$choice" ]] && return 0
+
+  tmux has-session -t "=$choice" 2>/dev/null && goto_session "$choice"
+
+  local conf="$PRESET_DIR/$choice.conf"
+  local root rootargs=()
+  root=$(sed -n 's/^root=//p' "$conf" | head -1)
+  root="${root/#\~/$HOME}"
+  [[ -d "$root" ]] && rootargs=(-c "$root")
+
+  local line val wname wcmd first=true
+  while IFS= read -r line; do
+    [[ "$line" == window=* ]] || continue
+    val="${line#window=}"
+    wname="${val%%:*}"
+    wcmd="${val#*:}"
+    [[ "$wcmd" == "$val" ]] && wcmd=""
+    if $first; then
+      tmux new-session -d -s "$choice" -n "$wname" "${rootargs[@]}"
+      first=false
+    else
+      tmux new-window -t "=$choice" -n "$wname" "${rootargs[@]}"
+    fi
+    [[ -n "$wcmd" ]] && tmux send-keys -t "=$choice:$wname" "$wcmd" Enter
+  done <"$conf"
+
+  # Preset with no window lines: plain session at root
+  $first && tmux new-session -d -s "$choice" "${rootargs[@]}"
+  goto_session "$choice"
+}
+
+# ── CLI entry points ────────────────────────────────────────
+case "${1:-}" in
+  --version) echo "fleetmux $FLEETMUX_VERSION"; exit 0 ;;
+  --help)    echo "$MSG_HELP"; exit 0 ;;
+  --list)    list_sessions; exit 0 ;;
+  --preview) preview_session "${2:-}"; exit 0 ;;
+  --kill)    kill_session_ui "${2:-}"; exit 0 ;;
+  --rename)  rename_session_ui "${2:-}"; exit 0 ;;
+  -)
+    if $inside_tmux; then
+      exec tmux switch-client -l
+    fi
+    last=$(tmux list-sessions -F $'#{session_activity}\t#{session_name}' 2>/dev/null |
+      sort -rn | head -1 | cut -f2)
+    [[ -n "$last" ]] && exec tmux attach-session -t "=$last"
+    exit 0
+    ;;
+esac
+
+# ── main picker ─────────────────────────────────────────────
+SELF="$(command -v tmux-sessions || echo "$0")"
+
+header="$MSG_HEADER"
+if $inside_tmux; then
+  header="${MSG_CURRENT_SESSION}: ${current_session}"$'\n\n'"$header"
+fi
+
+set +e
+result=$(
+  list_sessions |
+    fzf \
+      --ansi \
+      --height=100% \
+      --layout=reverse \
+      --border=rounded \
+      --prompt="tmux session > " \
+      --header="$header" \
+      --pointer="▶" \
+      --info=inline \
+      --delimiter=$'\t' \
+      --nth=1 \
+      --with-nth=2 \
+      --preview "$SELF --preview {1}" \
+      --preview-window=right:55% \
+      --print-query \
+      --expect=ctrl-n,ctrl-f,ctrl-p \
+      --bind "ctrl-x:execute($SELF --kill {1})+reload($SELF --list)" \
+      --bind "ctrl-r:execute($SELF --rename {1})+reload($SELF --list)"
+)
+fzf_status=$?
+set -e
+
+# Esc / Ctrl-C
+[[ $fzf_status -eq 130 ]] && exit 0
+
+query=$(sed -n '1p' <<<"$result")
+key=$(sed -n '2p' <<<"$result")
+selection=$(sed -n '3p' <<<"$result" | cut -f1)
+
+case "$key" in
+  ctrl-n)
+    [[ -z "$query" ]] && exit 0
+    create_session "$query"
+    ;;
+  ctrl-f)
+    sessionizer
+    ;;
+  ctrl-p)
+    create_from_preset
+    ;;
+  *)
+    if [[ -n "$selection" ]]; then
+      goto_session "$selection"
+    elif [[ -n "$query" ]]; then
       create_session "$query"
-      ;;
-    ctrl-r)
-      [[ -z "$selection" ]] && continue
-      printf '\n'
-      read -r -p "$(printf "$MSG_RENAME_FMT" "$selection")" new_name || true
-      if [[ -n "${new_name:-}" ]]; then
-        tmux rename-session -t "=$selection" "$new_name"
-      fi
-      ;;
-    ctrl-x)
-      [[ -z "$selection" ]] && continue
-      printf '\n'
-      read -r -p "$(printf "$MSG_DELETE_FMT" "$selection")" confirm || true
-      if [[ "${confirm:-}" == "1" ]]; then
-        tmux kill-session -t "=$selection"
-      fi
-      ;;
-    *)
-      # Enter
-      if [[ -n "$selection" ]]; then
-        goto_session "$selection"
-      elif [[ -n "$query" ]]; then
-        # No matching session for the typed name — create it
-        create_session "$query"
-      else
-        exit 0
-      fi
-      ;;
-  esac
-done
+    fi
+    ;;
+esac

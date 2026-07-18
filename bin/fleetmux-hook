@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# fleetmux-hook — report an AI agent's status to the fleetmux dashboard.
+#
+# Usage: fleetmux-hook <working|waiting|attention|done> [detail]
+#
+# Resolves its own tmux session via $TMUX and writes a one-line JSON state
+# file that the ts picker reads. Any CLI agent (or wrapper) can call this.
+# Designed for agent hooks: never fails, never blocks, exits 0 always.
+#
+# Env:
+#   FLEETMUX_AGENT — agent name shown in the dashboard (default: claude)
+{
+  status="${1:-}"
+  detail="${2:-}"
+
+  case "$status" in
+    working | waiting | attention | done) ;;
+    *) exit 0 ;;
+  esac
+
+  [ -n "${TMUX:-}" ] || exit 0
+  session=$(tmux display-message -p '#{session_name}' 2>/dev/null) || exit 0
+  [ -n "$session" ] || exit 0
+
+  dir="${XDG_STATE_HOME:-$HOME/.local/state}/fleetmux/agents"
+  mkdir -p "$dir" 2>/dev/null || exit 0
+
+  agent="${FLEETMUX_AGENT:-claude}"
+  now=$(date +%s)
+  # Strip characters that would break the flat JSON format
+  detail=$(printf '%s' "$detail" | tr -d '"\\{}' | head -c 120)
+
+  printf '{"session":"%s","agent":"%s","status":"%s","detail":"%s","ts":%s}\n' \
+    "$session" "$agent" "$status" "$detail" "$now" \
+    >"$dir/$session.state" 2>/dev/null
+} 2>/dev/null
+exit 0
