@@ -9,6 +9,8 @@ fzf-based tmux session management tools.
 - **`dev-launcher`** — tmux popup launcher (`Alt+q`) with Sessions / Tree /
   Git (lazygit) / Docker (lazydocker) / Files (yazi) / Claude menus.
 
+![dev-launcher popup](docs/dev-launcher.png)
+
 ## Install
 
 ```bash
