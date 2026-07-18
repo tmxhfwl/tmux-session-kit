@@ -2,6 +2,8 @@
 
 fzf-based tmux session management tools.
 
+![ts session picker](docs/ts-picker.png)
+
 - **`ts` (tmux-sessions)** — session picker. **Outside** tmux it attaches; **inside**
   tmux it uses `switch-client`, so there are no nested-session problems.
 - **`dev-launcher`** — tmux popup launcher (`Alt+q`) with Sessions / Tree /
